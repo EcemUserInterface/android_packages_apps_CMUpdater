@@ -19,32 +19,36 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
-import android.os.Environment;
-import android.os.PowerManager;
+import android.os.Build;
 import android.os.SystemProperties;
-import android.os.UserHandle;
-import android.os.storage.StorageManager;
-import android.os.storage.StorageVolume;
 import android.preference.PreferenceManager;
-import android.text.TextUtils;
 import android.util.Log;
 
 import com.cyanogenmod.updater.R;
 import com.cyanogenmod.updater.misc.Constants;
+import com.cyanogenmod.updater.misc.UpdateInfo;
 import com.cyanogenmod.updater.service.UpdateCheckService;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.OutputStream;
+import java.text.DateFormat;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.Locale;
+import java.util.TimeZone;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 
 public class Utils {
+
+    private static final String TAG = "Utils";
+
     private Utils() {
         // this class is not supposed to be instantiated
     }
 
-    public static File makeUpdateFolder() {
-        return new File(Environment.getExternalStorageDirectory(),
-                Constants.UPDATES_FOLDER);
+    public static File makeUpdateFolder(Context context) {
+        return context.getDir(Constants.UPDATES_FOLDER, Context.MODE_PRIVATE);
     }
 
     public static void cancelNotification(Context context) {
@@ -59,7 +63,11 @@ public class Utils {
     }
 
     public static String getInstalledVersion() {
-        return SystemProperties.get("ro.cm.version");
+        return SystemProperties.get("ro.cm.version").toLowerCase();
+    }
+
+    public static String getInstalledVersionName() {
+        return getInstalledVersion().split("-")[0];
     }
 
     public static int getInstalledApiLevel() {
@@ -70,8 +78,75 @@ public class Utils {
         return SystemProperties.getLong("ro.build.date.utc", 0);
     }
 
-    public static String getIncremental() {
-        return SystemProperties.get("ro.build.version.incremental");
+    public static String getInstalledBuildType() {
+        return SystemProperties.get(Constants.PROPERTY_CM_RELEASETYPE,
+                Constants.CM_RELEASE_TYPE_DEFAULT).toLowerCase();
+    }
+
+    public static UpdateInfo getInstalledUpdateInfo() {
+        return new UpdateInfo.Builder()
+            .setFileName("lineage-" + getInstalledVersion() + ".zip")
+            .setVersion(getInstalledVersionName())
+            .setApiLevel(getInstalledApiLevel())
+            .setBuildDate(getInstalledBuildDate())
+            .setType(getInstalledBuildType())
+            .build();
+    }
+
+    public static String getDateLocalized(Context context, long unixTimestamp) {
+        DateFormat f = DateFormat.getDateInstance(DateFormat.LONG, getCurrentLocale(context));
+        f.setTimeZone(TimeZone.getTimeZone("UTC"));
+        Date date = new Date(unixTimestamp * 1000);
+        return f.format(date);
+    }
+
+    public static String getDateLocalizedFromFileName(Context context, String fileName) {
+        return getDateLocalized(context, getTimestampFromFileName(fileName));
+    }
+
+    public static long getTimestampFromFileName(String fileName) {
+        String[] subStrings = fileName.split("-");
+        if (subStrings.length < 3 || subStrings[2].length() < 8) {
+            Log.e(TAG, "The given filename is not valid: " + fileName);
+            return 0;
+        }
+        SimpleDateFormat dateFormat = new SimpleDateFormat("yyyyMMdd");
+        try {
+            return (dateFormat.parse(subStrings[2]).getTime() / 1000);
+        } catch (ParseException e) {
+            Log.e(TAG, "The given filename is not valid: " + fileName);
+            return 0;
+        }
+    }
+
+    public static String getAndroidVersion(String versionName) {
+        if (versionName != null) {
+            switch (versionName) {
+                case "13.0":
+                    return "6.0";
+                case "14.1":
+                    return "7.1";
+            }
+        }
+        return "???";
+    }
+
+    public static String getVersionFromFileName(String fileName) {
+        String[] subStrings = fileName.split("-");
+        if (subStrings.length < 2 || subStrings[1].length() < 4) {
+            Log.e(TAG, "The given filename is not valid: " + fileName);
+            return "????";
+        }
+        return subStrings[1];
+    }
+
+    public static String getTypeFromFileName(String fileName) {
+        String[] subStrings = fileName.split("-");
+        if (subStrings.length < 4 || subStrings[3].length() < 7) {
+           Log.e(TAG, "The given filename is not valid: " + fileName);
+           return "???????";
+        }
+        return subStrings[3];
     }
 
     public static String getUserAgentString(Context context) {
@@ -113,49 +188,19 @@ public class Utils {
     }
 
     public static void triggerUpdate(Context context, String updateFileName) throws IOException {
-        // Add the update folder/file name
-        File primaryStorage = Environment.getExternalStorageDirectory();
-        // If the path is emulated, translate it, if not return the original path
-        String updatePath = Environment.maybeTranslateEmulatedPathToInternal(
-                primaryStorage).getAbsolutePath();
         // Create the path for the update package
-        String updatePackagePath = updatePath + "/" + Constants.UPDATES_FOLDER + "/" + updateFileName;
-
-        /*
-         * maybeTranslateEmulatedPathToInternal requires that we have a full path to a file (not just
-         * a directory) and have read access to the file via both the emulated and actual paths.  As
-         * this is currently done, we lack the ability to read the file via the actual path, so the
-         * translation ends up failing.  Until this is all updated to download and store the file in
-         * a sane way, manually perform the translation that is needed in order for uncrypt to be
-         * able to find the file.
-         */
-        updatePackagePath = updatePackagePath.replace("storage/emulated", "data/media");
+        String updatePackagePath = makeUpdateFolder(context).getPath() + "/" + updateFileName;
 
         // Reboot into recovery and trigger the update
         android.os.RecoverySystem.installPackage(context, new File(updatePackagePath));
     }
 
-    public static int getUpdateType() {
-        int updateType = Constants.UPDATE_TYPE_NIGHTLY;
-        try {
-            String cmReleaseType = SystemProperties.get(
-                    Constants.PROPERTY_CM_RELEASETYPE);
-
-            // Treat anything that is not SNAPSHOT as NIGHTLY
-            if (!cmReleaseType.isEmpty()) {
-                if (TextUtils.equals(cmReleaseType,
-                        Constants.CM_RELEASETYPE_SNAPSHOT)) {
-                    updateType = Constants.UPDATE_TYPE_SNAPSHOT;
-                }
-            }
-        } catch (RuntimeException ignored) {
-        }
-
-        return updateType;
+    public static String getUpdateType() {
+        return getInstalledBuildType();
     }
 
-    public static boolean hasLeanback(Context context) {
-        PackageManager packageManager = context.getPackageManager();
-        return packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK);
+    public static Locale getCurrentLocale(Context context) {
+        return context.getResources().getConfiguration().locale;
     }
+
 }
